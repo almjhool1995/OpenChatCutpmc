@@ -41,6 +41,46 @@ jobs:
       - name: Build Windows installer
         run: npm run desktop:dist:win
 
+      - name: Scan installer with Microsoft Defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releasePath = (Resolve-Path -LiteralPath release).Path
+
+          $status = Get-MpComputerStatus
+          if (-not $status.AntivirusEnabled) {
+            throw 'Microsoft Defender Antivirus is not enabled on this runner'
+          }
+
+          Update-MpSignature
+          Start-MpScan -ScanType CustomScan -ScanPath $releasePath
+
+          $threats = @(Get-MpThreatDetection | Where-Object {
+            $_.Resources -and ($_.Resources | Where-Object { $_ -like "*$releasePath*" })
+          })
+          if ($threats.Count -gt 0) {
+            $threats | Format-List * | Out-String | Write-Error
+            throw "Microsoft Defender detected $($threats.Count) threat(s) in the release directory"
+          }
+
+          Write-Host 'Microsoft Defender scan completed with no detected threats.'
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath release -File |
+            Where-Object { $_.Extension -in '.exe', '.blockmap', '.yml' }
+          if ($files.Count -eq 0) {
+            throw 'No release files found for checksum generation'
+          }
+
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding ascii
+          Get-Content -LiteralPath release/SHA256SUMS.txt
+
       - name: Install and smoke-test packaged app
         shell: pwsh
         env:
@@ -100,5 +140,6 @@ jobs:
             release/*.exe
             release/latest-x64.yml
             release/*.blockmap
+            release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
