@@ -1,0 +1,103 @@
+name: PMC Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - pmc-custom
+    paths:
+      - .github/workflows/pmc-windows.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pmc-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build and smoke-test Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --loglevel=error
+
+      - name: Ensure Remotion browser
+        run: node -e "import('@remotion/renderer').then(m => m.ensureBrowser()).then(() => console.log('browser ready'))"
+
+      - name: Build Windows installer
+        run: npm run desktop:dist:win
+
+      - name: Install and smoke-test packaged app
+        shell: pwsh
+        env:
+          CC_SMOKE: '1'
+          CC_SMOKE_RENDER: '1'
+          CC_SMOKE_MCP_RECOVERY: '1'
+          CC_SMOKE_RENDERER_RECOVERY: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem -LiteralPath release -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected one NSIS installer, found $($installers.Count)"
+          }
+
+          $installDir = Join-Path $env:RUNNER_TEMP "openchatcut-pmc-smoke-$PID"
+          Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+
+          try {
+            $install = Start-Process -FilePath $installers[0].FullName `
+              -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "Installer exited with $($install.ExitCode)"
+            }
+
+            $installedExe = Join-Path $installDir 'OpenChatCut.exe'
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              throw "Installer did not create $installedExe"
+            }
+
+            $stdout = Join-Path $env:RUNNER_TEMP 'pmc-smoke-stdout.log'
+            $stderr = Join-Path $env:RUNNER_TEMP 'pmc-smoke-stderr.log'
+            $smoke = Start-Process -FilePath $installedExe -PassThru `
+              -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $null = $smoke.Handle
+
+            if (-not $smoke.WaitForExit(420000)) {
+              Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
+              throw 'Packaged application smoke test timed out'
+            }
+
+            if (Test-Path $stdout) { Get-Content $stdout }
+            if (Test-Path $stderr) { Get-Content $stderr }
+
+            if ($smoke.ExitCode -ne 0) {
+              throw "Packaged application smoke test exited with $($smoke.ExitCode)"
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpenChatCut-PMC-Windows-x64
+          path: |
+            release/*.exe
+            release/latest-x64.yml
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
