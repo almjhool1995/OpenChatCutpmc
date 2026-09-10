@@ -1,5 +1,5 @@
 name: PMC Windows Build
-# Retriggered after enabling Actions
+# Actions enabled; trigger Windows build
 
 on:
   workflow_dispatch:
